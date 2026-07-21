@@ -1,11 +1,15 @@
 """
 llm_suggest.py
-Sends each distinct error group (not every individual occurrence) to Claude
+Sends each distinct error group (not every individual occurrence) to Gemini
 along with the user's issue description, and gets back a structured
 root-cause + fix suggestion.
 
-Requires: pip install anthropic
-Requires env var: ANTHROPIC_API_KEY
+Requires: pip install google-generativeai
+Requires env var: GEMINI_API_KEY
+
+Get a free key (no credit card required) at https://aistudio.google.com/apikey
+Free tier as of mid-2026: Gemini 2.5 Flash — 10 requests/min, 250 requests/day.
+That's comfortably enough for analyzing a batch of error groups per incident.
 """
 
 import json
@@ -13,11 +17,11 @@ import os
 from typing import Optional
 
 try:
-    import anthropic
+    import google.generativeai as genai
 except ImportError:
-    anthropic = None
+    genai = None
 
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 SYSTEM_PROMPT = """You are a senior SAP Hybris / Java engineer helping debug production issues \
 from log analysis. You will be given: (1) a description of the issue a user is experiencing, \
@@ -58,25 +62,24 @@ def suggest_fix(issue_description: str, group, api_key: Optional[str] = None) ->
     """Returns a dict with relevance/root_cause/suggested_fix/hybris_context.
     Falls back to a placeholder if no API key / package is available, so the
     rest of the pipeline (report generation) still works end-to-end."""
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    key = api_key or os.environ.get("GEMINI_API_KEY")
 
-    if not key or anthropic is None:
+    if not key or genai is None:
         return {
             "relevance": "unknown",
-            "root_cause": "(LLM suggestion unavailable — set ANTHROPIC_API_KEY to enable this.)",
+            "root_cause": "(LLM suggestion unavailable — set GEMINI_API_KEY to enable this.)",
             "suggested_fix": "",
             "hybris_context": "",
         }
 
-    client = anthropic.Anthropic(api_key=key)
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=600,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_user_prompt(issue_description, group)}],
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(MODEL, system_instruction=SYSTEM_PROMPT)
+        response = model.generate_content(
+            build_user_prompt(issue_description, group),
+            generation_config={"response_mime_type": "application/json"},
         )
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        text = response.text.strip()
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return json.loads(text)
     except Exception as exc:  # noqa: BLE001 - surface any failure into the report itself
