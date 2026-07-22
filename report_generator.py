@@ -105,6 +105,10 @@ body {
   box-shadow: var(--shadow);
 }
 
+.error-card{
+  overflow:auto;
+}
+
 .hero {
   padding: 30px;
   border-radius: 32px;
@@ -379,7 +383,6 @@ details {
   border-radius: 22px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: rgba(248, 249, 252, 0.82);
-  overflow: hidden;
 }
 
 summary {
