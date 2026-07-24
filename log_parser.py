@@ -32,7 +32,7 @@ LINE_PATTERNS = [
             r"^(?P<level>\w+)\s*\|\s*jvm\s*\d+\s*\|\s*[\w\-]*\s*\|\s*"
             r"(?P<ts>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s*\|\s?(?P<content>.*)$"
         ),
-        "ts_format": "%Y/%m/%d %H:%M:%S.%f",
+        "ts_formats": ["%Y/%m/%d %H:%M:%S.%f"],
     },
     {
         "name": "log4j2_standard",
@@ -40,7 +40,7 @@ LINE_PATTERNS = [
             r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[,.]\d{3})\s+"
             r"(?P<level>[A-Z]+)\s+(?P<content>.*)$"
         ),
-        "ts_format": "%Y-%m-%d %H:%M:%S,%f",
+        "ts_formats": ["%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S.%f"],
     },
 ]
 
@@ -48,12 +48,34 @@ LINE_PATTERNS = [
 # new one: stack frames, "Caused by:", and "... N more" truncation markers.
 CONTINUATION_RE = re.compile(r"^\s*(at\s|Caused by:|\.\.\.\s*\d+\s+more)")
 
-# Detects whether an entry's first content line represents an actual error,
-# independent of the wrapper-assigned log level (which in wrapper.log is
-# always INFO regardless of real severity).
+LEVEL_ALIASES = {
+    "TRACE": "trace",
+    "DEBUG": "debug",
+    "INFO": "info",
+    "WARN": "warning",
+    "WARNING": "warning",
+    "ERROR": "error",
+    "FATAL": "error",
+}
+
+SEVERITY_PRIORITY = {
+    "trace": 0,
+    "debug": 1,
+    "info": 2,
+    "warning": 3,
+    "error": 4,
+}
+
+CONTENT_LEVEL_RE = re.compile(r"^\s*\[?(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\]?\b[:\s-]*")
+
 ERROR_CONTENT_RE = re.compile(
-    r"(?:^|\s)([\w$]+\.)+[\w$]*(Exception|Error)\b|"
-    r"\bERROR\b|\bFATAL\b|\bCaused by:"
+    r"(?:^|\s)([\w$]+\.)*[\w$]*(Exception|Error)\b|"
+    r"\b(ERROR|FATAL|SEVERE|FAILED|FAILURE)\b|"
+    r"\bCaused by:"
+)
+WARNING_CONTENT_RE = re.compile(
+    r"\bWARN(?:ING)?\b|"
+    r"\b(DEPRECATED|TIMEOUT|RETRY(?:ING)?|SLOW|UNAVAILABLE|BLOCKED)\b"
 )
 
 # Extracts a fully-qualified exception/error class name, e.g.
@@ -70,9 +92,44 @@ STACK_FRAME_RE = re.compile(r"at\s+([\w$.<>]+)\(")
 DYNAMIC_TOKEN_RE = re.compile(r"\b(0x[0-9a-fA-F]+|\d{4,}|\d+)\b")
 
 
+def normalize_level(level: Optional[str]) -> Optional[str]:
+    if not level:
+        return None
+    return LEVEL_ALIASES.get(level.strip().upper())
+
+
+def parse_timestamp(ts_str: str, ts_formats: List[str]) -> Optional[datetime]:
+    for fmt in ts_formats:
+        try:
+            return datetime.strptime(ts_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def infer_content_level(content: str) -> Optional[str]:
+    match = CONTENT_LEVEL_RE.match(content)
+    if match:
+        return normalize_level(match.group(1))
+    if ERROR_CONTENT_RE.search(content):
+        return "error"
+    if WARNING_CONTENT_RE.search(content):
+        return "warning"
+    return None
+
+
+def pick_severity(*levels: Optional[str]) -> str:
+    candidates = [level for level in levels if level]
+    if not candidates:
+        return "info"
+    return max(candidates, key=lambda level: SEVERITY_PRIORITY.get(level, -1))
+
+
 @dataclass
 class LogEntry:
     timestamp: datetime
+    severity: str = "info"
+    declared_level: Optional[str] = None
     raw_lines: List[str] = field(default_factory=list)
     content_lines: List[str] = field(default_factory=list)
 
@@ -82,12 +139,23 @@ class LogEntry:
 
     @property
     def is_error(self) -> bool:
-        return bool(ERROR_CONTENT_RE.search(self.first_content))
+        return self.severity == "error"
+
+    @property
+    def is_warning(self) -> bool:
+        return self.severity == "warning"
+
+    @property
+    def is_issue(self) -> bool:
+        return self.severity in {"error", "warning"}
 
     @property
     def exception_class(self) -> Optional[str]:
-        m = EXCEPTION_CLASS_RE.search(self.first_content)
-        return m.group(1) if m else None
+        for line in self.content_lines:
+            m = EXCEPTION_CLASS_RE.search(line)
+            if m:
+                return m.group(1)
+        return None
 
     @property
     def root_cause_class(self) -> Optional[str]:
@@ -111,10 +179,11 @@ class LogEntry:
     @property
     def message(self) -> str:
         """Human-readable message from the first line (class stripped)."""
-        m = EXCEPTION_CLASS_RE.search(self.first_content)
+        content = CONTENT_LEVEL_RE.sub("", self.first_content, count=1).strip()
+        m = EXCEPTION_CLASS_RE.search(content)
         if m:
-            return self.first_content[m.end():].lstrip(": ").strip()
-        return self.first_content.strip()
+            return content[m.end():].lstrip(": ").strip()
+        return content
 
     @property
     def raw_text(self) -> str:
@@ -122,10 +191,12 @@ class LogEntry:
 
     def fingerprint(self) -> str:
         """Groups occurrences of 'the same' error, ignoring IDs/values."""
-        cause = self.root_cause_class or self.exception_class or "UnknownError"
+        cause = self.root_cause_class or self.exception_class or (
+            "Warning" if self.is_warning else "UnknownError"
+        )
         frame = self.top_frame or ""
         norm_msg = DYNAMIC_TOKEN_RE.sub("#", self.message)[:120]
-        return f"{cause}|{frame}|{norm_msg}"
+        return f"{self.severity}|{cause}|{frame}|{norm_msg}"
 
 
 def detect_pattern(sample_lines: List[str]):
@@ -164,20 +235,27 @@ def parse_log(text: str) -> List[LogEntry]:
             continue
 
         ts_str, content = m.group("ts"), m.group("content")
-        try:
-            ts = datetime.strptime(ts_str, pattern["ts_format"])
-        except ValueError:
+        declared_level = normalize_level(m.groupdict().get("level"))
+        inferred_level = infer_content_level(content)
+        severity = pick_severity(declared_level, inferred_level)
+        ts = parse_timestamp(ts_str, pattern["ts_formats"])
+        if ts is None:
             ts = current.timestamp if current else None
 
         if current is not None and CONTINUATION_RE.match(content):
             current.raw_lines.append(line)
             current.content_lines.append(content)
-            if ts:
-                current.timestamp = current.timestamp  # keep entry's start ts
+            current.severity = pick_severity(current.severity, severity)
         else:
             if current is not None:
                 entries.append(current)
-            current = LogEntry(timestamp=ts, raw_lines=[line], content_lines=[content])
+            current = LogEntry(
+                timestamp=ts,
+                severity=severity,
+                declared_level=declared_level,
+                raw_lines=[line],
+                content_lines=[content],
+            )
 
     if current is not None:
         entries.append(current)
@@ -192,6 +270,7 @@ def filter_by_window(entries: List[LogEntry], start: datetime, end: datetime) ->
 @dataclass
 class ErrorGroup:
     fingerprint: str
+    severity: str
     exception_class: str
     message: str
     sample_entry: LogEntry
@@ -211,15 +290,16 @@ class ErrorGroup:
 
 
 def cluster_errors(entries: List[LogEntry]) -> List[ErrorGroup]:
-    """Group error entries that represent 'the same' underlying error."""
+    """Group warning/error entries that represent the same underlying issue."""
     groups = {}
     for e in entries:
-        if not e.is_error:
+        if not e.is_issue:
             continue
         fp = e.fingerprint()
         if fp not in groups:
             groups[fp] = ErrorGroup(
                 fingerprint=fp,
+                severity=e.severity,
                 exception_class=e.root_cause_class or e.exception_class or "UnknownError",
                 message=e.message,
                 sample_entry=e,

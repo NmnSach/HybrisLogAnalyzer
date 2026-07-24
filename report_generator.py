@@ -17,6 +17,11 @@ RELEVANCE_COLOR = {
     "unknown": ("#475569", "rgba(71, 85, 105, 0.10)", "rgba(71, 85, 105, 0.16)"),
 }
 
+SEVERITY_COLOR = {
+    "error": ("#b91c1c", "rgba(185, 28, 28, 0.10)", "rgba(185, 28, 28, 0.18)"),
+    "warning": ("#a16207", "rgba(161, 98, 7, 0.12)", "rgba(161, 98, 7, 0.20)"),
+}
+
 CSS = """
 :root {
   --bg: #f3f5f8;
@@ -503,6 +508,14 @@ def _relevance_badge(relevance: str) -> str:
     )
 
 
+def _severity_badge(severity: str) -> str:
+    fg, bg, border = SEVERITY_COLOR.get(severity, RELEVANCE_COLOR["unknown"])
+    return (
+        f'<span class="badge" style="color:{fg};background:{bg};border-color:{border}">'
+        f"{html.escape(severity)}</span>"
+    )
+
+
 def generate_html_report(
     issue_description: str,
     window_start: datetime,
@@ -548,6 +561,7 @@ def generate_html_report(
                     <p class="message">{html.escape(g.message[:400])}</p>
                 </div>
                 <div class="badges">
+                    {_severity_badge(g.severity)}
                     {_relevance_badge(sug.get('relevance','unknown'))}
                     <span class="count-badge">{g.count} occurrence{'s' if g.count != 1 else ''}</span>
                 </div>
@@ -571,8 +585,8 @@ def generate_html_report(
         """)
 
     body = "\n".join(cards) if cards else (
-        '<div class="empty"><strong>No errors found in this time window.</strong>'
-        "The parser completed successfully, but nothing in the selected range matched the current error detection rules.</div>"
+        '<div class="empty"><strong>No warnings or errors found in this time window.</strong>'
+        "The parser completed successfully, but nothing in the selected range matched the current issue detection rules.</div>"
     )
 
     return f"""<!DOCTYPE html>
@@ -620,19 +634,19 @@ def generate_html_report(
 
     <section class="summary-grid">
       <div class="summary-card">
-        <p class="kicker">Distinct Error Groups</p>
+        <p class="kicker">Distinct Issue Groups</p>
         <span class="value">{len(groups)}</span>
-        <div class="subvalue">Unique clustered failures detected in the chosen time window.</div>
+        <div class="subvalue">Unique clustered warnings and failures detected in the chosen time window.</div>
       </div>
       <div class="summary-card">
         <p class="kicker">Total Occurrences</p>
         <span class="value">{total_occurrences}</span>
-        <div class="subvalue">Combined repeat count across every grouped error.</div>
+        <div class="subvalue">Combined repeat count across every grouped warning or error.</div>
       </div>
       <div class="summary-card">
         <p class="kicker">High Relevance</p>
         <span class="value">{high_relevance}</span>
-        <div class="subvalue">Error groups judged strongly related to the reported issue.</div>
+        <div class="subvalue">Issue groups judged strongly related to the reported issue.</div>
       </div>
       <div class="summary-card">
         <p class="kicker">AI Coverage</p>
